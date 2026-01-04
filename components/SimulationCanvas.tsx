@@ -1,5 +1,5 @@
 
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import { SimulationProfile, SimulationState } from '../types';
 
 interface SimulationCanvasProps {
@@ -10,92 +10,120 @@ interface SimulationCanvasProps {
 
 const SimulationCanvas: React.FC<SimulationCanvasProps> = ({ profile, isPaused, resetSignal }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [state, setState] = useState<SimulationState>(profile.initialState);
-  const [localParams, setLocalParams] = useState(profile.parameters);
-  // Fixed: useRef expects an initial value argument in this environment
+  
+  // High-performance mutable state storage
+  // We use refs instead of useState for the physics loop to prevent React re-renders on every frame
+  const stateRef = useRef<SimulationState>(profile.initialState);
+  const paramsRef = useRef<Record<string, number>>({});
+  
+  // UI Display state - updated at a lower frequency to save main thread resources
+  const [telemetryState, setTelemetryState] = useState<SimulationState>(profile.initialState);
+  
   const requestRef = useRef<number | undefined>(undefined);
-  // Fixed: useRef expects an initial value argument in this environment
   const lastTimeRef = useRef<number | undefined>(undefined);
+  const lastTelemetryTimeRef = useRef<number>(0);
 
-  // Update local params when props change (specifically for slider interaction)
+  // Sync parameters to ref for access inside the animation loop without closure staleness
   useEffect(() => {
-    setLocalParams(profile.parameters);
+    paramsRef.current = profile.parameters.reduce((acc, p) => ({ ...acc, [p.id]: p.value }), {});
   }, [profile.parameters]);
 
-  // Reset state when profile or reset signal changes
+  // Memoize the executable functions to avoid recompilation overhead
+  const updateFn = useMemo(() => {
+    try {
+      // (state, params, dt) => newState
+      return new Function('state', 'params', 'dt', profile.updateLogic);
+    } catch (err) {
+      console.error("Failed to compile update logic:", err);
+      return (s: any) => s;
+    }
+  }, [profile.updateLogic]);
+
+  const drawFn = useMemo(() => {
+    try {
+      // (ctx, state, params, w, h) => void
+      return new Function('ctx', 'state', 'params', 'w', 'h', profile.drawLogic);
+    } catch (err) {
+      console.error("Failed to compile draw logic:", err);
+      return () => {};
+    }
+  }, [profile.drawLogic]);
+
+  // Reset simulation when profile changes or reset is requested
   useEffect(() => {
-    setState(profile.initialState);
+    stateRef.current = { ...profile.initialState };
+    setTelemetryState({ ...profile.initialState });
+    lastTimeRef.current = undefined;
   }, [profile.initialState, resetSignal]);
 
-  const update = useCallback((dt: number) => {
-    if (isPaused) return;
-
-    try {
-      // Create executable logic from string
-      // (state, params, dt) => newState
-      const updateFn = new Function('state', 'params', 'dt', profile.updateLogic);
-      
-      // Convert params list to object for easier access in script
-      const paramsObj = localParams.reduce((acc, p) => ({ ...acc, [p.id]: p.value }), {});
-      
-      setState(prevState => {
-        const newState = updateFn(prevState, paramsObj, dt);
-        return newState || prevState;
-      });
-    } catch (err) {
-      console.error("Physics Update Error:", err);
+  const animate = useCallback((time: number) => {
+    if (lastTimeRef.current === undefined) {
+      lastTimeRef.current = time;
     }
-  }, [profile.updateLogic, localParams, isPaused]);
-
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    ctx.clearRect(0, 0, w, h);
-
-    try {
-      // Create executable logic from string
-      // (ctx, state, params, w, h) => void
-      const drawFn = new Function('ctx', 'state', 'params', 'w', 'h', profile.drawLogic);
-      const paramsObj = localParams.reduce((acc, p) => ({ ...acc, [p.id]: p.value }), {});
-      
-      drawFn(ctx, state, paramsObj, w, h);
-    } catch (err) {
-      console.error("Drawing Error:", err);
-    }
-  }, [profile.drawLogic, state, localParams]);
-
-  const animate = (time: number) => {
-    if (lastTimeRef.current !== undefined) {
-      const dt = Math.min((time - lastTimeRef.current) / 1000, 0.1); // cap dt to prevent tunneling
-      update(dt);
-    }
+    
+    // Calculate delta time in seconds, clamped to 0.1s to prevent explosion on tab switch
+    const dt = Math.min((time - lastTimeRef.current) / 1000, 0.1);
     lastTimeRef.current = time;
-    draw();
+
+    // 1. Physics Update Step
+    if (!isPaused) {
+      try {
+        const newState = updateFn(stateRef.current, paramsRef.current, dt);
+        if (newState) {
+          stateRef.current = newState;
+        }
+      } catch (err) {
+        // Fail silently in loop to avoid console spam, or log deeply throttled
+      }
+    }
+
+    // 2. Rendering Step
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        try {
+           const w = canvas.width;
+           const h = canvas.height;
+           drawFn(ctx, stateRef.current, paramsRef.current, w, h);
+        } catch (err) {
+           // Fail silently
+        }
+      }
+    }
+
+    // 3. Telemetry Step (Throttled to ~15fps)
+    if (time - lastTelemetryTimeRef.current > 60) {
+      setTelemetryState({ ...stateRef.current });
+      lastTelemetryTimeRef.current = time;
+    }
+
     requestRef.current = requestAnimationFrame(animate);
-  };
+  }, [updateFn, drawFn, isPaused]); // Removed profile.parameters from dependency to prevent stutter on slider drag
 
   useEffect(() => {
     requestRef.current = requestAnimationFrame(animate);
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
     };
-  }, [update, draw]);
+  }, [animate]);
 
-  // Handle resizing
+  // Handle Resize
   useEffect(() => {
     const handleResize = () => {
       if (canvasRef.current) {
-        canvasRef.current.width = canvasRef.current.parentElement?.clientWidth || 800;
-        canvasRef.current.height = canvasRef.current.parentElement?.clientHeight || 600;
+        const parent = canvasRef.current.parentElement;
+        if (parent) {
+          // Set internal resolution to match client size for sharp rendering
+          canvasRef.current.width = parent.clientWidth;
+          canvasRef.current.height = parent.clientHeight;
+        }
       }
     };
+    
+    // Initial size
     handleResize();
+    
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
@@ -104,21 +132,23 @@ const SimulationCanvas: React.FC<SimulationCanvasProps> = ({ profile, isPaused, 
     <div className="relative w-full h-full bg-zinc-950 rounded-2xl border border-zinc-800 overflow-hidden shadow-inner group">
       <canvas ref={canvasRef} className="block w-full h-full cursor-crosshair" />
       
-      <div className="absolute top-4 left-4 p-3 bg-zinc-900/80 backdrop-blur rounded-lg border border-zinc-800 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity">
+      {/* Telemetry Overlay - Shows throttled state for readability and performance */}
+      <div className="absolute top-4 left-4 p-3 bg-zinc-900/80 backdrop-blur rounded-lg border border-zinc-800 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity z-10">
         <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-tighter mb-2">Live Telemetry</h4>
         <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-          {Object.entries(state).slice(0, 6).map(([key, val]) => (
+          {Object.entries(telemetryState).slice(0, 8).map(([key, val]) => (
             <div key={key} className="flex justify-between items-center gap-4">
               <span className="text-[10px] mono text-zinc-400">{key}:</span>
-              {/* Cast val to number because TypeScript Object.entries on indexed types might infer unknown/any */}
-              <span className="text-[10px] mono text-blue-400">{(val as number).toFixed(2)}</span>
+              <span className="text-[10px] mono text-blue-400">
+                {typeof val === 'number' ? val.toFixed(2) : val}
+              </span>
             </div>
           ))}
         </div>
       </div>
       
       {isPaused && (
-        <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/20 backdrop-grayscale pointer-events-none">
+        <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/20 backdrop-grayscale pointer-events-none z-20">
           <div className="px-6 py-3 bg-zinc-900 border border-zinc-700 rounded-full text-zinc-400 font-medium text-sm animate-pulse">
             System Paused
           </div>

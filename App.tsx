@@ -6,11 +6,143 @@ import ControlPanel from './components/ControlPanel';
 import SimulationCanvas from './components/SimulationCanvas';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
+const DEFAULT_PROFILE: SimulationProfile = {
+  title: "Gravitational Lensing Event",
+  description: "Real-time visualization of light ray deflection (geodesics) caused by the spacetime curvature of a supermassive object.",
+  physicsDescription: "Based on General Relativity principles where mass curves spacetime. Light rays follow geodesics which appear bent in 3D space. This simulation uses a high-performance integration step to trace photon paths interacting with a central gravitational potential.",
+  parameters: [
+    { id: 'mass', name: 'Singularity Mass', min: 1000, max: 50000, step: 1000, value: 15000, unit: 'M☉' },
+    { id: 'c', name: 'Light Velocity', min: 5, max: 50, step: 1, value: 20, unit: 'c' },
+    { id: 'density', name: 'Ray Density', min: 10, max: 150, step: 5, value: 60, unit: 'rays' },
+    { id: 'horizon', name: 'Event Horizon', min: 10, max: 100, step: 5, value: 40, unit: 'px' }
+  ],
+  initialState: { t: 0 },
+  updateLogic: `
+    // Simple time accumulator for any time-based animations (like accretion disk flow)
+    return { t: state.t + dt };
+  `,
+  drawLogic: `
+    const { mass, c, density, horizon } = params;
+    const cx = 0; 
+    // Clear background
+    ctx.fillStyle = '#09090b';
+    ctx.fillRect(0, 0, w, h);
+
+    const centerX = w / 2;
+    const centerY = h / 2;
+
+    // Draw Accretion Disk / Lensing Distortion Field (Visual Effect)
+    const time = state.t || 0;
+    
+    ctx.save();
+    ctx.translate(centerX, centerY);
+
+    // Dynamic Accretion Glow
+    const glowRadius = horizon * (3 + Math.sin(time * 2) * 0.1);
+    const gradient = ctx.createRadialGradient(0, 0, horizon, 0, 0, glowRadius);
+    gradient.addColorStop(0, '#000000');
+    gradient.addColorStop(0.2, 'rgba(249, 115, 22, 0.8)'); // Orange-500
+    gradient.addColorStop(0.6, 'rgba(180, 83, 9, 0.2)');  // Amber-700
+    gradient.addColorStop(1, 'rgba(0,0,0,0)');
+    
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(0, 0, glowRadius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Event Horizon
+    ctx.fillStyle = '#000000';
+    ctx.beginPath();
+    ctx.arc(0, 0, horizon, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#f97316'; // Orange-500
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Photon Tracing
+    // We re-calculate the paths every frame for stateless rendering
+    ctx.lineWidth = 1;
+    ctx.globalCompositeOperation = 'screen'; // Additive blending for light rays
+
+    const raySpacing = h / density;
+    const startX = -w / 2;
+    
+    for (let i = 0; i < density; i++) {
+        // Distribute rays vertically
+        const initialY = (i - density / 2) * raySpacing;
+        
+        // Simulation variables for this ray
+        let px = startX;
+        let py = initialY;
+        let vx = c;
+        let vy = 0;
+        
+        ctx.beginPath();
+        // Color based on distance from center (redshift effect visualization)
+        ctx.strokeStyle = Math.abs(initialY) < horizon * 2 ? 'rgba(239, 68, 68, 0.6)' : 'rgba(59, 130, 246, 0.4)';
+        
+        ctx.moveTo(px, py);
+        
+        let active = true;
+        let steps = 0;
+        
+        while (active && steps < w/c * 2) {
+            const dx = 0 - px;
+            const dy = 0 - py;
+            const distSq = dx*dx + dy*dy;
+            const dist = Math.sqrt(distSq);
+            
+            // Event Horizon Collision
+            if (dist < horizon) {
+                active = false;
+                break;
+            }
+            
+            // Bounds check (optimization)
+            if (px > w/2 || Math.abs(py) > h) {
+                active = false;
+                break;
+            }
+            
+            // Gravitational Force (Newtonian approx for viz: F = G*M/r^2)
+            // We apply it perpendicular to velocity to simulate bending without speed change (mostly)
+            
+            const force = mass / Math.max(distSq, 10);
+            const ax = (dx / dist) * force;
+            const ay = (dy / dist) * force;
+            
+            vx += ax;
+            vy += ay;
+            
+            // Normalize speed to c (light speed constancy)
+            const speed = Math.sqrt(vx*vx + vy*vy);
+            vx = (vx / speed) * c;
+            vy = (vy / speed) * c;
+            
+            px += vx;
+            py += vy;
+            
+            ctx.lineTo(px, py);
+            steps++;
+        }
+        ctx.stroke();
+    }
+    
+    ctx.restore();
+    
+    // Telemetry Overlay
+    ctx.fillStyle = '#52525b';
+    ctx.font = '10px JetBrains Mono';
+    ctx.fillText('Schwarzschild Metric approx.', 20, h - 20);
+  `
+};
+
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [prompt, setPrompt] = useState('');
   const [image, setImage] = useState<string | null>(null);
-  const [profile, setProfile] = useState<SimulationProfile | null>(null);
+  // Initialize with the Default Profile
+  const [profile, setProfile] = useState<SimulationProfile | null>(DEFAULT_PROFILE);
   const [isPaused, setIsPaused] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -83,7 +215,7 @@ const App: React.FC = () => {
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Describe a physics scenario... e.g., 'A 2kg mass on a spring with damping' or 'Two billiard balls colliding in 2D'"
+              placeholder="Describe a physics scenario (e.g., 'Double pendulum') or upload a whiteboard sketch to generate a simulation automatically."
               className="w-full h-32 bg-zinc-950 border border-zinc-800 rounded-xl p-4 text-sm focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 outline-none transition-all resize-none text-zinc-200 placeholder:text-zinc-600"
             />
             
@@ -150,7 +282,7 @@ const App: React.FC = () => {
           {!profile && appState === AppState.IDLE && (
             <div className="bg-zinc-900/30 border border-dashed border-zinc-800 rounded-2xl p-6 text-center">
               <p className="text-zinc-500 text-sm leading-relaxed">
-                Welcome, Scientist.<br/>Input a problem above to start the bespoke engine.
+                Welcome, Scientist.<br/>Input a problem or upload a whiteboard sketch to start the bespoke engine.
               </p>
             </div>
           )}

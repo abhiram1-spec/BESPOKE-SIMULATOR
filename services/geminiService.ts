@@ -6,7 +6,7 @@ import { SimulationProfile } from "../types";
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const SYSTEM_INSTRUCTION = `You are a "Bespoke Simulator Engine", an expert physics educator and senior React engineer.
-Your goal is to convert text physics/math problems into a functional, structured simulation profile.
+Your goal is to convert text physics/math problems (and optional whiteboard sketches) into a functional, structured simulation profile.
 
 You must return a JSON object that adheres strictly to the SimulationProfile structure.
 The profile includes:
@@ -26,12 +26,27 @@ Constraints:
 - Only return the JSON.
 - Physics must be accurate (Euler integration is fine for speed).
 - Use Tailwind colors if you write text: #3b82f6 (blue), #ef4444 (red), #10b981 (green).
+
+Methodology:
+- Infer the physics concept from the diagram/text (e.g., projectile motion, springs, orbital mechanics).
+- Reconstruct the model mathematically (equations of motion, conservation laws).
+- Create a real-time interactive visualization.
+- Add sliders for all relevant physical parameters (mass, gravity, damping, initial velocity, etc.).
+- Render everything in a single interactive canvas.
+- Make the simulation explorable and educational.
 `;
 
 export async function generateSimulation(prompt: string, imageData?: string): Promise<SimulationProfile> {
+  // If prompt is empty but image exists, provide a default instruction
+  const effectivePrompt = prompt.trim() || (imageData ? "Analyze this whiteboard sketch and generate a fully interactive physics simulation based on the concepts inferred from it." : "");
+
+  if (!effectivePrompt) {
+    throw new Error("No prompt or image provided");
+  }
+
   const contents = imageData 
-    ? { parts: [{ text: prompt }, { inlineData: { data: imageData.split(',')[1], mimeType: 'image/jpeg' } }] }
-    : prompt;
+    ? { parts: [{ text: effectivePrompt }, { inlineData: { data: imageData.split(',')[1], mimeType: 'image/jpeg' } }] }
+    : effectivePrompt;
 
   const response = await ai.models.generateContent({
     model: 'gemini-3-pro-preview',
