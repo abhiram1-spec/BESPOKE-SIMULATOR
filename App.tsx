@@ -1,6 +1,6 @@
 
 import React, { useState, useCallback, useRef } from 'react';
-import { generateSimulation } from './services/geminiService';
+import { generateSimulation, generatePreviewVideo } from './services/geminiService';
 import { SimulationProfile, AppState, SimulationParam } from './types';
 import ControlPanel from './components/ControlPanel';
 import SimulationCanvas from './components/SimulationCanvas';
@@ -137,15 +137,18 @@ const DEFAULT_PROFILE: SimulationProfile = {
   `
 };
 
-const App: React.FC = () => {
+export const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [prompt, setPrompt] = useState('');
   const [image, setImage] = useState<string | null>(null);
-  // Initialize with the Default Profile
   const [profile, setProfile] = useState<SimulationProfile | null>(DEFAULT_PROFILE);
   const [isPaused, setIsPaused] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Video Generation State
+  const [isVideoLoading, setIsVideoLoading] = useState(false);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
 
   const handleGenerate = async () => {
     if (!prompt.trim() && !image) return;
@@ -159,6 +162,36 @@ const App: React.FC = () => {
     } catch (err) {
       console.error(err);
       setAppState(AppState.ERROR);
+    }
+  };
+
+  const handleGenerateVideo = async () => {
+    if (!prompt.trim() && !profile) return;
+    const promptToUse = prompt.trim() || profile?.title || "Physics simulation";
+
+    // Veo Model Key Check
+    const aistudio = (window as any).aistudio;
+    if (aistudio) {
+      const hasKey = await aistudio.hasSelectedApiKey();
+      if (!hasKey) {
+        try {
+           await aistudio.openSelectKey();
+        } catch (e) {
+          console.error("Key selection failed or cancelled", e);
+          return;
+        }
+      }
+    }
+
+    setIsVideoLoading(true);
+    try {
+      const url = await generatePreviewVideo(promptToUse);
+      setVideoUrl(url);
+    } catch (e) {
+      console.error("Video generation failed", e);
+      alert("Failed to generate video. Please try again.");
+    } finally {
+      setIsVideoLoading(false);
     }
   };
 
@@ -246,27 +279,41 @@ const App: React.FC = () => {
               />
             </div>
 
-            <button
-              onClick={handleGenerate}
-              disabled={appState === AppState.GENERATING}
-              className={`w-full h-12 mt-4 rounded-xl font-bold text-sm tracking-wide shadow-lg transition-all transform active:scale-95 ${
-                appState === AppState.GENERATING
-                  ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
-                  : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/20'
-              }`}
-            >
-              {appState === AppState.GENERATING ? (
-                <span className="flex items-center justify-center gap-2">
-                  <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  ENGINEERING...
-                </span>
-              ) : (
-                'GENERATE SIMULATION'
-              )}
-            </button>
+            <div className="grid grid-cols-1 gap-3 mt-4">
+              <button
+                onClick={handleGenerate}
+                disabled={appState === AppState.GENERATING || isVideoLoading}
+                className={`w-full h-12 rounded-xl font-bold text-sm tracking-wide shadow-lg transition-all transform active:scale-95 ${
+                  appState === AppState.GENERATING
+                    ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                    : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/20'
+                }`}
+              >
+                {appState === AppState.GENERATING ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    SIMULATING...
+                  </span>
+                ) : (
+                  'GENERATE SIMULATION'
+                )}
+              </button>
+
+              <button
+                onClick={handleGenerateVideo}
+                disabled={isVideoLoading || (!prompt && !profile)}
+                className={`w-full h-10 rounded-xl font-bold text-xs tracking-wide border transition-all ${
+                  isVideoLoading
+                    ? 'bg-zinc-900 border-zinc-800 text-zinc-500 cursor-not-allowed'
+                    : 'bg-zinc-900 border-zinc-800 text-purple-400 hover:text-purple-300 hover:border-purple-500/50 hover:bg-purple-900/10'
+                }`}
+              >
+                {isVideoLoading ? 'RENDERING VIDEO (MAY TAKE MINS)...' : '✨ GENERATE DEMO VIDEO'}
+              </button>
+            </div>
           </div>
 
           {profile && (
@@ -289,8 +336,8 @@ const App: React.FC = () => {
         </div>
 
         {/* Center: Simulation Canvas */}
-        <div className="lg:col-span-9 flex flex-col gap-6">
-          <div className="flex-1 min-h-[500px]">
+        <div className="lg:col-span-9 flex flex-col gap-6 relative">
+          <div className="flex-1 min-h-[500px] relative z-0">
             {profile ? (
               <SimulationCanvas 
                 profile={profile} 
@@ -330,11 +377,39 @@ const App: React.FC = () => {
         </div>
       </main>
 
+      {/* Video Modal */}
+      {videoUrl && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
+          <div className="relative w-full max-w-5xl bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden shadow-2xl">
+            <div className="flex items-center justify-between p-4 border-b border-zinc-800 bg-zinc-950">
+               <h3 className="text-sm font-bold text-purple-400 uppercase tracking-wider">Veo Generated Preview</h3>
+               <button 
+                 onClick={() => setVideoUrl(null)}
+                 className="w-8 h-8 flex items-center justify-center rounded-lg bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700 transition-all"
+               >
+                 ✕
+               </button>
+            </div>
+            <div className="relative aspect-video bg-black">
+              <video 
+                src={videoUrl} 
+                controls 
+                autoPlay 
+                loop 
+                className="w-full h-full object-contain"
+              />
+            </div>
+            <div className="p-4 bg-zinc-950 text-xs text-zinc-500 border-t border-zinc-800 flex justify-between">
+              <span>Generated by Veo 3.1</span>
+              <a href={videoUrl} download="demo_simulation.mp4" className="text-blue-400 hover:underline">Download MP4</a>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Background Decorative Element */}
       <div className="fixed -bottom-32 -left-32 w-96 h-96 bg-blue-600/10 blur-[120px] pointer-events-none" />
       <div className="fixed -top-32 -right-32 w-96 h-96 bg-purple-600/5 blur-[120px] pointer-events-none" />
     </div>
   );
 };
-
-export default App;

@@ -113,3 +113,34 @@ export async function generateSimulation(prompt: string, imageData?: string): Pr
     initialState: initialStateMap
   };
 }
+
+export async function generatePreviewVideo(prompt: string): Promise<string> {
+  // Re-initialize AI to ensure we use the latest API key if the user selected a new one via window.aistudio
+  const veOAi = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
+  const videoPrompt = `Cinematic, high-resolution scientific visualization of: ${prompt}. Photorealistic physics simulation, 4k, detailed texture, studio lighting, educational demo.`;
+
+  let operation = await veOAi.models.generateVideos({
+    model: 'veo-3.1-fast-generate-preview',
+    prompt: videoPrompt,
+    config: {
+      numberOfVideos: 1,
+      resolution: '1080p',
+      aspectRatio: '16:9'
+    }
+  });
+
+  // Polling loop for video generation
+  while (!operation.done) {
+    await new Promise(resolve => setTimeout(resolve, 5000)); // Poll every 5 seconds
+    operation = await veOAi.operations.getVideosOperation({ operation: operation });
+  }
+
+  const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
+  if (!videoUri) {
+    throw new Error("Video generation failed to return a valid URI");
+  }
+
+  // Append the API key to the URI for authenticated access
+  return `${videoUri}&key=${process.env.API_KEY}`;
+}
