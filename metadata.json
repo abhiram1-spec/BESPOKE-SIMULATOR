@@ -1,0 +1,7 @@
+{
+  "name": "Bespoke Simulator Engine",
+  "description": "An expert physics educator and simulation designer that converts abstract problems into interactive, real-time generative UI simulations.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
